@@ -939,11 +939,14 @@ function handleSSEEvent(evt) {
       if (projects.length === 1) {
         const p = projects[0];
         dom.contextIndicator.className = p.generated ? 'context-indicator generated' : 'context-indicator has-context';
-        dom.contextText.textContent = p.generated ? `${p.name}: CLAUDE.md auto-generated` : `${p.name}: CLAUDE.md loaded`;
+        const extras = [p.hasRules ? 'rules' : '', p.hasCommands ? 'commands' : ''].filter(Boolean).join(', ');
+        const ctxLabel = p.generated ? 'CLAUDE.md auto-generated' : 'CLAUDE.md loaded';
+        dom.contextText.textContent = `${p.name}: ${ctxLabel}${extras ? ` + ${extras}` : ''}`;
       } else if (projects.length > 1) {
         const allLoaded = projects.every(p => !p.generated);
+        const rulesCount = projects.filter(p => p.hasRules).length;
         dom.contextIndicator.className = allLoaded ? 'context-indicator has-context' : 'context-indicator generated';
-        dom.contextText.textContent = `${projects.length} projects: CLAUDE.md loaded`;
+        dom.contextText.textContent = `${projects.length} projects: CLAUDE.md loaded${rulesCount ? ` + ${rulesCount} with rules` : ''}`;
       }
       break;
     }

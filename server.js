@@ -92,14 +92,63 @@ async function readLocalFile(projectPath, filePath) {
   return fs.readFile(full, 'utf-8');
 }
 
-// ── CLAUDE.md Support ─────────────────────────────────────────────────────────
+// ── Project Context Support ───────────────────────────────────────────────────
 
-async function readClaudeMd(projectPath) {
+async function readFileOrNull(filePath) {
   try {
-    return await fs.readFile(path.join(projectPath, 'CLAUDE.md'), 'utf-8');
+    return await fs.readFile(filePath, 'utf-8');
   } catch {
     return null;
   }
+}
+
+async function readClaudeMd(projectPath) {
+  return readFileOrNull(path.join(projectPath, 'CLAUDE.md'));
+}
+
+/**
+ * Read all Claude config files from the target project:
+ * - CLAUDE.md — project context (tech stack, conventions)
+ * - .claude/rules — engineering rules & guidelines
+ * - .claude/settings.json — project settings
+ * - .claude/commands/*.md — custom command definitions
+ */
+async function readClaudeConfig(projectPath) {
+  const config = {};
+
+  // .claude/rules — engineering guidelines (critical for agent behavior)
+  const rulesPath = path.join(projectPath, '.claude', 'rules');
+  config.rules = await readFileOrNull(rulesPath);
+  if (config.rules) log('CTX', `Read .claude/rules (${config.rules.length} chars)`);
+
+  // .claude/settings.json — project-level settings
+  const settingsPath = path.join(projectPath, '.claude', 'settings.json');
+  const settingsRaw = await readFileOrNull(settingsPath);
+  if (settingsRaw) {
+    try {
+      config.settings = JSON.parse(settingsRaw);
+      log('CTX', 'Read .claude/settings.json');
+    } catch {}
+  }
+
+  // .claude/commands/*.md — custom commands (useful context for agents)
+  const commandsDir = path.join(projectPath, '.claude', 'commands');
+  try {
+    const entries = await fs.readdir(commandsDir, { withFileTypes: true });
+    const commands = [];
+    for (const entry of entries) {
+      if (entry.isFile() && entry.name.endsWith('.md')) {
+        const content = await readFileOrNull(path.join(commandsDir, entry.name));
+        if (content) commands.push({ name: entry.name.replace('.md', ''), content });
+      }
+    }
+    if (commands.length) {
+      config.commands = commands;
+      log('CTX', `Read ${commands.length} custom command(s) from .claude/commands/`);
+    }
+  } catch {}
+
+  return config;
 }
 
 async function generateClaudeMd(projectPath, fileTree) {
@@ -181,7 +230,24 @@ async function getProjectContext(projectPath, fileTree) {
   } else {
     log('CTX', `Read existing CLAUDE.md (${claudeMd.length} chars)`);
   }
-  return { claudeMd, generated };
+
+  // Read additional Claude config (.claude/rules, settings, commands)
+  const claudeConfig = await readClaudeConfig(projectPath);
+
+  // Merge rules and commands into the context string so all agents see them
+  const contextParts = [claudeMd];
+
+  if (claudeConfig.rules) {
+    contextParts.push(`\n\n## Project Rules (.claude/rules)\nThe following rules MUST be followed. They override any conflicting defaults:\n\n${claudeConfig.rules}`);
+  }
+
+  if (claudeConfig.commands?.length) {
+    const cmdSummary = claudeConfig.commands.map(c => `- /${c.name}: ${c.content.split('\n')[0]}`).join('\n');
+    contextParts.push(`\n\n## Custom Commands (.claude/commands)\n${cmdSummary}`);
+  }
+
+  const fullContext = contextParts.join('');
+  return { claudeMd: fullContext, generated, claudeConfig };
 }
 
 // ── Git Helpers ───────────────────────────────────────────────────────────────
@@ -347,17 +413,72 @@ async function runArchAgent(plan, fileTree, projectType, claudeMd, instructions)
   return parseJSON(result);
 }
 
-async function runRepoAgent(plan, archPlan, fileContents, projectType, claudeMd, instructions) {
-  const fileCtx = Object.entries(fileContents)
-    .map(([p, c]) => `=== ${p} ===\n${c.length > 6000 ? c.slice(0, 6000) + '\n... [truncated at 6000 chars]' : c}`)
-    .join('\n\n');
+const REPO_BATCH_SIZE = 5; // files per batch — keeps prompts manageable
 
-  log('REPO', `Preparing prompt with ${Object.keys(fileContents).length} file(s) as context...`);
+async function runRepoAgent(plan, archPlan, fileContents, projectType, claudeMd, instructions, emit) {
   const basePrompt = await loadPrompt('repo-agent');
   const systemPrompt = buildSystemPrompt(basePrompt, instructions);
-  const userMsg = `Project type: ${projectType}\n\nProject context (CLAUDE.md):\n${claudeMd || '(none)'}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nFile change instructions:\n${JSON.stringify(archPlan.file_changes, null, 2)}\n\nCurrent file contents:\n${fileCtx || '(no existing files — all new code)'}`;
-  const result = await runClaude('REPO', systemPrompt, userMsg);
-  return parseJSON(result);
+  const fileChanges = archPlan.file_changes || [];
+
+  // Small changes: single pass (fast path)
+  if (fileChanges.length <= REPO_BATCH_SIZE) {
+    const fileCtx = Object.entries(fileContents)
+      .map(([p, c]) => `=== ${p} ===\n${c.length > 6000 ? c.slice(0, 6000) + '\n... [truncated at 6000 chars]' : c}`)
+      .join('\n\n');
+
+    log('REPO', `Single pass — ${fileChanges.length} file(s)`);
+    const userMsg = `Project type: ${projectType}\n\nProject context (CLAUDE.md):\n${claudeMd || '(none)'}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nFile change instructions:\n${JSON.stringify(fileChanges, null, 2)}\n\nCurrent file contents:\n${fileCtx || '(no existing files — all new code)'}`;
+    const result = await runClaude('REPO', systemPrompt, userMsg);
+    return parseJSON(result);
+  }
+
+  // Large changes: process in batches, accumulate results
+  log('REPO', `Large change detected — ${fileChanges.length} files, processing in batches of ${REPO_BATCH_SIZE}`);
+  const allFiles = {};
+  const allTests = {};
+  let commitMessage = '';
+
+  const batches = [];
+  for (let i = 0; i < fileChanges.length; i += REPO_BATCH_SIZE) {
+    batches.push(fileChanges.slice(i, i + REPO_BATCH_SIZE));
+  }
+
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    const batchPaths = batch.map(f => f.path);
+    log('REPO', `Batch ${i + 1}/${batches.length}: ${batchPaths.join(', ')}`);
+    if (emit) {
+      emit('agent', { id: 'repo', status: 'running', msg: `Writing batch ${i + 1}/${batches.length} (${batch.length} files)...` });
+      emit('log', { id: 'repo', msg: `Batch ${i + 1}/${batches.length}: ${batchPaths.join(', ')}` });
+    }
+
+    // Include existing file contents for this batch only
+    const batchFileCtx = batch
+      .filter(f => fileContents[f.path])
+      .map(f => {
+        const c = fileContents[f.path];
+        return `=== ${f.path} ===\n${c.length > 6000 ? c.slice(0, 6000) + '\n... [truncated at 6000 chars]' : c}`;
+      })
+      .join('\n\n');
+
+    // Include summary of already-generated files so this batch stays consistent
+    const prevFilesSummary = Object.keys(allFiles).length
+      ? `\n\nAlready generated files (for reference/imports — do NOT regenerate these):\n${Object.entries(allFiles).map(([p, c]) => `- ${p} (${c.split('\n').length} lines)`).join('\n')}`
+      : '';
+
+    const userMsg = `Project type: ${projectType}\n\nProject context (CLAUDE.md):\n${claudeMd || '(none)'}\n\nFull plan:\n${JSON.stringify(plan, null, 2)}\n\nFile change instructions for THIS BATCH ONLY:\n${JSON.stringify(batch, null, 2)}\n\nCurrent file contents:\n${batchFileCtx || '(no existing files — all new code)'}${prevFilesSummary}`;
+
+    const result = await runClaude('REPO', systemPrompt, userMsg);
+    const parsed = parseJSON(result);
+
+    // Merge batch results
+    Object.assign(allFiles, parsed.files || {});
+    Object.assign(allTests, parsed.tests || {});
+    if (parsed.commit_message && !commitMessage) commitMessage = parsed.commit_message;
+  }
+
+  log('REPO', `All ${batches.length} batches complete — ${Object.keys(allFiles).length} files + ${Object.keys(allTests).length} tests`);
+  return { files: allFiles, tests: allTests, commit_message: commitMessage };
 }
 
 async function runPRReviewAgent(plan, codeFiles, testFiles, projectType, claudeMd, instructions) {
@@ -532,8 +653,8 @@ app.post('/api/run', async (req, res) => {
         log('CTX', `${proj.name} file tree error: ${e.message}`);
       }
 
-      const { claudeMd, generated } = await getProjectContext(proj.path, fileTree);
-      projectStates.push({ ...proj, originalBranch, stashed, fileTree, claudeMd, generated });
+      const { claudeMd, generated, claudeConfig } = await getProjectContext(proj.path, fileTree);
+      projectStates.push({ ...proj, originalBranch, stashed, fileTree, claudeMd, generated, claudeConfig });
     }
 
     // ── 0.5. Merge contexts across projects ─────────────────────────
@@ -544,7 +665,7 @@ app.post('/api/run', async (req, res) => {
       mergedFileTree = ps.fileTree;
       mergedClaudeMd = ps.claudeMd;
       primaryType = ps.type || 'fullstack';
-      emit('context', { projects: [{ name: ps.name, claudeMd: ps.claudeMd?.slice(0, 500) || null, generated: ps.generated }] });
+      emit('context', { projects: [{ name: ps.name, claudeMd: ps.claudeMd?.slice(0, 500) || null, generated: ps.generated, hasRules: !!ps.claudeConfig?.rules, hasCommands: !!ps.claudeConfig?.commands?.length }] });
     } else {
       mergedFileTree = [];
       const claudeParts = [];
@@ -554,7 +675,7 @@ app.post('/api/run', async (req, res) => {
           mergedFileTree.push(`[${ps.name}]/${entry}`);
         }
         claudeParts.push(`# Project: ${ps.name} (${ps.type || 'fullstack'})\n\n${ps.claudeMd || '(no CLAUDE.md)'}`);
-        contextEvents.push({ name: ps.name, claudeMd: ps.claudeMd?.slice(0, 300) || null, generated: ps.generated });
+        contextEvents.push({ name: ps.name, claudeMd: ps.claudeMd?.slice(0, 300) || null, generated: ps.generated, hasRules: !!ps.claudeConfig?.rules, hasCommands: !!ps.claudeConfig?.commands?.length });
       }
       mergedClaudeMd = claudeParts.join('\n\n---\n\n');
       primaryType = projectStates[0].type || 'fullstack';
@@ -654,7 +775,7 @@ app.post('/api/run', async (req, res) => {
 
       emit('log', { id: 'repo', msg: 'Writing code...' });
       const codeChanges = await safeAgentRun('REPO', 'repo', emit, async () => {
-        const result = await runRepoAgent(plan, archPlan, fileContents, primaryType, mergedClaudeMd, agentInstructions('repo'));
+        const result = await runRepoAgent(plan, archPlan, fileContents, primaryType, mergedClaudeMd, agentInstructions('repo'), emit);
         return result;
       }, repoFallback);
       currentFiles = { ...(codeChanges.files || {}) };

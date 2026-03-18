@@ -2,7 +2,6 @@
 
 **Paste a ticket. 8 AI agents enhance, plan, architect, code, review, QA, and commit to local branches.**
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node 18+](https://img.shields.io/badge/node-18%2B-brightgreen.svg)]()
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
