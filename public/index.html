@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engineering Team Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Geist:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+<link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- Left panel -->
+  <div class="panel-left">
+    <div class="panel-header">
+      <div class="brand">
+        <div class="brand-dot"></div>
+        <h1>Engineering Team</h1>
+      </div>
+      <div class="brand-sub">Paste a ticket. 8 agents ship it.</div>
+    </div>
+
+    <div class="panel-body">
+
+      <!-- Project list (multi-select checkboxes) -->
+      <div class="project-selector">
+        <label>Projects</label>
+        <div class="project-list" id="projectList">
+          <div class="project-empty">No projects added yet</div>
+        </div>
+        <button class="icon-btn wide" id="addProjectBtn" title="Add project">+ Add Project</button>
+      </div>
+
+      <!-- Add project form (hidden) -->
+      <div class="add-project-form hidden" id="addProjectForm">
+        <label>Project name</label>
+        <input id="newProjectName" placeholder="My App">
+        <label>Browse to project folder</label>
+        <div class="dir-browser" id="dirBrowser">
+          <div class="dir-breadcrumb" id="dirBreadcrumb"></div>
+          <div class="dir-list" id="dirList"></div>
+        </div>
+        <div class="dir-selected" id="dirSelected">No folder selected</div>
+        <input type="hidden" id="newProjectPath">
+        <label>Project type</label>
+        <select id="newProjectType">
+          <option value="fullstack">Fullstack</option>
+          <option value="backend">Backend</option>
+          <option value="frontend">Frontend</option>
+          <option value="android">Android</option>
+          <option value="ios">iOS</option>
+        </select>
+        <div class="form-actions">
+          <button class="btn-secondary" id="cancelAddProject">Cancel</button>
+          <button class="btn-primary" id="confirmAddProject">Add</button>
+        </div>
+      </div>
+
+      <!-- Ticket input -->
+      <div>
+        <label>Ticket description</label>
+        <textarea id="ticket" rows="8" placeholder="As a user, I want to be able to reset my password via email...
+
+Include:
+&bull; What the feature does
+&bull; Edge cases to handle
+&bull; Affected screens / APIs"></textarea>
+      </div>
+
+      <!-- Agent Settings (collapsible) -->
+      <div class="agent-settings">
+        <button class="settings-toggle" id="settingsToggle">
+          Agent Settings <span class="toggle-arrow" id="toggleArrow">&#9656;</span>
+        </button>
+        <div class="settings-body hidden" id="settingsBody">
+          <div class="setting-row" data-agent="enhance">
+            <label class="setting-check"><input type="checkbox" checked> Enhancer</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+          <div class="setting-row" data-agent="pm">
+            <label class="setting-check"><input type="checkbox" checked> PM Agent</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+          <div class="setting-row" data-agent="arch">
+            <label class="setting-check"><input type="checkbox" checked> Architect</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+          <div class="setting-row" data-agent="repo">
+            <label class="setting-check"><input type="checkbox" checked> Repo Agent</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+          <div class="setting-row" data-agent="review">
+            <label class="setting-check"><input type="checkbox" checked> PR Review</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+          <div class="setting-group">
+            <label class="setting-group-check"><input type="checkbox" id="qaGroupToggle" checked> QA Agents</label>
+          </div>
+          <div class="setting-row qa-child" data-agent="qa1">
+            <label class="setting-check"><input type="checkbox" checked> QA #1</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+          <div class="setting-row qa-child" data-agent="qa2">
+            <label class="setting-check"><input type="checkbox" checked> QA #2</label>
+            <input class="setting-instr" placeholder="Extra instructions...">
+          </div>
+        </div>
+      </div>
+
+      <!-- CLAUDE.md indicator -->
+      <div class="context-indicator" id="contextIndicator">
+        <span class="context-dot"></span>
+        <span class="context-text" id="contextText">No project selected</span>
+      </div>
+
+    </div>
+
+    <div class="panel-footer">
+      <button class="run-btn" id="runBtn">
+        <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+          <path d="M3 2L13 7.5L3 13V2Z" fill="currentColor"/>
+        </svg>
+        Run engineering team
+      </button>
+    </div>
+  </div>
+
+  <!-- Right panel -->
+  <div class="panel-right">
+    <div class="pipeline-header">
+      <span class="pipeline-title" id="pipelineStatus">Waiting for ticket...</span>
+      <span class="branch-badge" id="branchBadge"></span>
+    </div>
+
+    <div class="pipeline-body" id="pipelineBody">
+
+      <!-- Progress bar -->
+      <div class="progress-bar"><div class="progress-bar-fill" id="progressFill"></div></div>
+
+      <!-- Agent cards -->
+      <div class="agents-row" id="agentsRow"></div>
+
+      <!-- Decision timeline -->
+      <div class="timeline-panel hidden" id="timelinePanel">
+        <div class="timeline-header">Decision Timeline</div>
+        <div class="timeline-body" id="timelineBody"></div>
+      </div>
+
+      <!-- Log terminal -->
+      <div class="log-panel">
+        <div class="log-header">
+          <span style="color:var(--green)">&#9679;</span>
+          <span>agent.log</span>
+        </div>
+        <div class="log-filters" id="logFilters">
+          <button class="log-filter active" data-filter="all">All</button>
+          <button class="log-filter" data-filter="enhance">Enhance</button>
+          <button class="log-filter" data-filter="pm">PM</button>
+          <button class="log-filter" data-filter="arch">Arch</button>
+          <button class="log-filter" data-filter="repo">Repo</button>
+          <button class="log-filter" data-filter="review">Review</button>
+          <button class="log-filter" data-filter="qa1">QA 1</button>
+          <button class="log-filter" data-filter="qa2">QA 2</button>
+          <button class="log-filter" data-filter="git">Git</button>
+        </div>
+        <div class="log-body" id="logBody">
+          <div class="log-line"><span class="log-msg" style="color:var(--muted); font-style:italic">Waiting for pipeline...</span></div>
+        </div>
+      </div>
+
+      <!-- Error / Success banners -->
+      <div class="error-banner" id="errorBanner"></div>
+      <div class="success-banner" id="successBanner">
+        <div class="success-title" id="successTitle"></div>
+        <div class="success-detail" id="successDetail"></div>
+      </div>
+
+      <!-- Output area -->
+      <div id="outputArea">
+        <div class="empty-state">
+          <div class="empty-icon">&#9881;</div>
+          <div class="empty-title">Run a ticket to see agent outputs</div>
+          <div class="empty-sub">Enhanced ticket, plan, architecture, code, PR review, QA results will appear here.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-jsx.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-css.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-kotlin.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-java.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-swift.min.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
